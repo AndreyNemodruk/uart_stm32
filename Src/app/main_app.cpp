@@ -1,108 +1,108 @@
-// #include <stdio.h>
-// #include <stdbool.h>
-// #include <stdlib.h>
-
-// #include "main.h"
-// #include "printf/usb_printf.h"
-
-// extern "C" ADC_HandleTypeDef hadc1;
-// extern "C" TIM_HandleTypeDef htim2;
-
-// // ==================== ADC ====================
-
-// static uint32_t Read_ADC_Raw()
-// {
-//     uint32_t raw = 0;
-
-//     HAL_ADC_Start(&hadc1);
-
-//     if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK)
-//     {
-//         raw = HAL_ADC_GetValue(&hadc1);
-//     }
-
-//     HAL_ADC_Stop(&hadc1);
-
-//     return raw;
-// }
-
-// // ==================== MAIN ====================
-
-// extern "C" void main_cpp()
-// {
-//     // Запускаем PWM TIM2 CH1 → PA0
-//     HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-
-//     printf("\r\n");
-//     printf("ADC -> PWM TEST\r\n");
-//     printf("PA4 -> ADC -> PWM PA0\r\n");
-//     printf("| RAW  | Duty |\r\n");
-//     printf("|------|------|\r\n");
-
-//     while (1)
-//     {
-//         // Читаем потенциометр с PA4
-//         uint32_t raw = Read_ADC_Raw();
-
-//         // RAW 0..4095 преобразуем в CCR 0..999
-//         uint32_t pulse = (raw * 999UL) / 4095UL;
-
-//         // Меняем заполнение PWM
-//         __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pulse);
-//         if (raw < 50)
-//         {
-//             raw = 0;
-//         }
-
-//         if (raw > 4080)
-//         {
-//             raw = 4095;
-//         }
-//         // Рассчитываем заполнение в процентах
-//         uint32_t duty = (raw * 100UL) / 4095UL;
-
-//         printf(
-//             "| %4lu | %3lu%% |\r\n",
-//             raw,
-//             duty);
-
-//         HAL_Delay(100);
-//     }
-// }
-
 #include <stdint.h>
+#include <string.h>
 
 #include "main.h"
 
-extern "C" TIM_HandleTypeDef htim2;
+extern UART_HandleTypeDef huart1;
 
-static const uint32_t sineTable[] =
+#define COMMAND_SIZE 64
+#define BTN_PORT GPIOB
+#define BTN_PIN GPIO_PIN_7
+#define LED_PORT GPIOB
+#define LED_PIN GPIO_PIN_8
+#define DEBOUNCE_MS 50U
+
+static char rxBuffer[COMMAND_SIZE];
+static uint8_t rxPos = 0;
+static bool ledRequestedOn = false;
+
+static void led_set(bool on)
+{
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+static void uart_send(const char *text)
+{
+    HAL_UART_Transmit(&huart1, (uint8_t *)text, strlen(text), 100);
+}
+
+static int uart_read_bytes(uint8_t *dst, uint16_t len)
+{
+    return HAL_UART_Receive(&huart1, dst, len, 10) == HAL_OK ? (int)len : 0;
+}
+
+static void handle_command(const char *command)
+{
+    if (strcmp(command, "LED_ON") == 0)
     {
-        25, 33, 40, 45, 48,
-        49, 48, 45, 40, 33,
-        25, 17, 10, 5, 2,
-        0, 2, 5, 10, 17};
+        led_set(true);
+    }
+    else if (strcmp(command, "LED_OFF") == 0)
+    {
+        led_set(false);
+    }
+}
 
-constexpr uint32_t SINE_POINTS = 20;
+static void on_button_short_press(void)
+{
+    ledRequestedOn = !ledRequestedOn;
+    uart_send(ledRequestedOn ? "LED_ON\r\n" : "LED_OFF\r\n");
+}
+
+static void btn_poll(void)
+{
+    static GPIO_PinState btn_raw = GPIO_PIN_SET;
+    static GPIO_PinState btn_stable = GPIO_PIN_SET;
+    static uint32_t btn_tick;
+
+    GPIO_PinState btn = HAL_GPIO_ReadPin(BTN_PORT, BTN_PIN);
+    if (btn != btn_raw)
+    {
+        btn_raw = btn;
+        btn_tick = HAL_GetTick();
+    }
+    else if ((HAL_GetTick() - btn_tick) >= DEBOUNCE_MS && btn != btn_stable)
+    {
+        btn_stable = btn;
+        if (btn == GPIO_PIN_RESET)
+        {
+            on_button_short_press();
+        }
+    }
+}
+
+static void uart_poll(void)
+{
+    uint8_t rx;
+    int len = uart_read_bytes(&rx, 1);
+
+    if (len <= 0)
+    {
+        return;
+    }
+
+    if (rx == '\r' || rx == '\n')
+    {
+        if (rxPos > 0)
+        {
+            rxBuffer[rxPos] = '\0';
+            handle_command(rxBuffer);
+            rxPos = 0;
+        }
+        return;
+    }
+
+    if (rxPos < sizeof(rxBuffer) - 1)
+    {
+        rxBuffer[rxPos++] = (char)rx;
+    }
+}
 
 extern "C" void main_cpp()
 {
-    HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-
-    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim2);
-
     while (1)
     {
-        for (uint32_t i = 0; i < SINE_POINTS; i++)
-        {
-            uint32_t pulse = (sineTable[i] * arr) / 49;
-
-            __HAL_TIM_SET_COMPARE(
-                &htim2,
-                TIM_CHANNEL_1,
-                pulse);
-
-            HAL_Delay(0);
-        }
+        btn_poll();
+        uart_poll();
     }
 }
