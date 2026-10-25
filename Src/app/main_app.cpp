@@ -1,55 +1,38 @@
-#include <stdio.h>
-
 #include "main.h"
 
-extern ADC_HandleTypeDef hadc1;
-extern UART_HandleTypeDef huart1;
+#define LED_PIN (1u << 8)
+#define BTN_PIN (1u << 7)
 
-#define ADC_RANK_COUNT 1
-
-static uint32_t adc_dma_buf[ADC_RANK_COUNT];
-static char uart_tx_buf[48];
-
-static void uart_send_adc(uint32_t raw, uint32_t mv)
-{
-    int n;
-
-    if (huart1.gState != HAL_UART_STATE_READY)
-    {
-        return;
-    }
-
-    n = snprintf(uart_tx_buf, sizeof(uart_tx_buf), "ADC %lu  %lu mV\r\n", raw, mv);
-    if (n <= 0)
-    {
-        return;
-    }
-
-    HAL_UART_Transmit_DMA(&huart1, (uint8_t *)uart_tx_buf, (uint16_t)n);
-}
+static const uint32_t k_periods_ms[] = {100u, 200u, 500u, 1000u};
 
 extern "C" void main_cpp()
 {
-    HAL_Delay(2000);
-
-    if (huart1.hdmatx == NULL)
-    {
-        printf("[UART] TX DMA not linked. Add USART1_TX DMA in Cube.\r\n");
-        return;
-    }
-
-    if (HAL_ADC_Start_DMA(&hadc1, adc_dma_buf, ADC_RANK_COUNT) != HAL_OK)
-    {
-        printf("[ADC] DMA start failed\r\n");
-        return;
-    }
+    uint32_t period_i = 0;
+    uint32_t last_blink = 0;
+    uint32_t last_btn = 0;
+    bool btn_was = false;
 
     while (1)
     {
-        uint32_t raw = adc_dma_buf[0] & 0xFFFu;
-        uint32_t mv = (raw * 3300u) / 4095u;
+        uint32_t now = uwTick;
+        bool btn = ((GPIOB->IDR & BTN_PIN) == 0u);
 
-        uart_send_adc(raw, mv);
-        HAL_Delay(200);
+        if (btn && !btn_was && ((now - last_btn) > 20u))
+        {
+            period_i++;
+            if (period_i >= 4u)
+            {
+                period_i = 0;
+            }
+            last_btn = now;
+        }
+        btn_was = btn;
+
+        if ((now - last_blink) >= k_periods_ms[period_i])
+        {
+            last_blink = now;
+            uint32_t odr = GPIOB->ODR;
+            GPIOB->BSRR = ((odr & LED_PIN) << 16u) | (~odr & LED_PIN);
+        }
     }
 }
